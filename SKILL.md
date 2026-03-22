@@ -8,81 +8,68 @@ version: 1.0.0
 metadata:
   openclaw:
     requires:
-      bins: ["uv"]
+      bins: ["python3"]
     emoji: "🔧"
 ---
 
 # build123d CAD
 
-Parametric 3D CAD via [build123d](https://build123d.readthedocs.io). This skill runs an MCP server that exposes 4 tools for generating and measuring 3D solids from Python scripts.
+Parametric 3D CAD via [build123d](https://build123d.readthedocs.io). This skill provides Python scripts for generating and measuring 3D solids. Run them with the `exec` tool.
 
-## Setup
-
-The MCP server runs from `{baseDir}/src/server.py` in a Python 3.12 venv. On first use, set it up:
+## Setup (first time only)
 
 ```bash
 cd {baseDir}
 uv venv --python 3.12
-uv pip install -e .
+uv pip install build123d
 ```
 
-## MCP Server
+## Commands
 
-This skill bundles an MCP server. Add to your `~/.openclaw/openclaw.json`:
+All scripts use the venv Python at `{baseDir}/.venv/bin/python`. All output JSON to stdout.
 
-```json
-{
-  "mcpServers": {
-    "build123d": {
-      "command": "{baseDir}/.venv/bin/python",
-      "args": ["-m", "src.server"],
-      "cwd": "{baseDir}"
-    }
-  }
-}
+### Generate — export STEP/STL/SVG
+
+```bash
+{baseDir}/.venv/bin/python {baseDir}/scripts/cad_generate.py \
+  --script 'from build123d import *
+with BuildPart() as result:
+    Box(100, 60, 40)' \
+  --format step \
+  --filename my_box
 ```
 
-Then restart: `openclaw gateway restart`
+Output: `{ "success": true, "artifact_path": "...", "format": "step", "file_size_bytes": N, "bounding_box_mm": {...} }`
 
-## Tools
+### Measure — dimensions, volume, mass
 
-Once the MCP server is connected, you have these tools:
-
-### cad_generate
-
-Execute a build123d script and export STEP, STL, or SVG.
-
-```
-cad_generate(script="from build123d import *\nwith BuildPart() as result:\n    Box(100,60,40)", export_format="step")
+```bash
+{baseDir}/.venv/bin/python {baseDir}/scripts/cad_measure.py \
+  --script 'from build123d import *
+with BuildPart() as result:
+    Cylinder(10, 50)'
 ```
 
-Returns: `{ success, artifact_path, format, file_size_bytes, bounding_box_mm }`
+Output: `{ "success": true, "bounding_box_mm": {...}, "volume_mm3": N, "surface_area_mm2": N, "center_of_mass_mm": {...}, "face_count": N, "edge_count": N }`
 
-Exported files go to `~/.openclaw/workspace/cad-output/`.
+### Section — 2D cross-section SVG
 
-### cad_measure
-
-Execute a script and return measurements — bounding box, volume, surface area, center of mass, face/edge counts.
-
-```
-cad_measure(script="...")
-```
-
-Returns: `{ success, bounding_box_mm, volume_mm3, surface_area_mm2, center_of_mass_mm, face_count, edge_count }`
-
-### cad_section
-
-Generate a 2D cross-section SVG at a given plane and offset. Useful for clearance checks and mechanical drawings.
-
-```
-cad_section(script="...", plane="XY", offset=5.0)
+```bash
+{baseDir}/.venv/bin/python {baseDir}/scripts/cad_section.py \
+  --script '...' \
+  --plane XY \
+  --offset 5.0
 ```
 
-Returns: `{ success, artifact_path, plane, offset_mm, section_edge_count }`
+Output: `{ "success": true, "artifact_path": "...", "plane": "XY", "offset_mm": 5.0 }`
 
-### cad_list_api
+### API Reference — build123d cheatsheet
 
-Return a build123d API cheatsheet — primitives, operations, selectors, export functions. No script execution. Call this first if you need to learn what's available.
+```bash
+{baseDir}/.venv/bin/python {baseDir}/scripts/cad_api.py
+```
+
+Output: JSON with primitives, operations, selectors, export functions. Call this first if you need to learn what's available.
 
 ## Script Format
 
@@ -98,16 +85,16 @@ with BuildPart() as result:
         CounterBoreHole(radius=5, counter_bore_radius=8, counter_bore_depth=3, depth=40)
 ```
 
-All dimensions are in millimeters.
+All dimensions in millimeters. Exported files go to `~/.openclaw/workspace/cad-output/`.
 
 ## Workflow
 
-1. If unsure about build123d API, call `cad_list_api` first for the cheatsheet.
+1. If unsure about build123d API, run `cad_api.py` first for the cheatsheet.
 2. Write a parameterized script (no magic numbers).
-3. Call `cad_measure` to verify dimensions before exporting.
-4. Call `cad_generate` with the desired format (step for CAD interchange, stl for 3D printing).
-5. For clearance checks, call `cad_section` at relevant planes.
-6. Report artifact paths — they're in `~/.openclaw/workspace/cad-output/`, accessible via file tools.
+3. Run `cad_measure.py` to verify dimensions before exporting.
+4. Run `cad_generate.py` with the desired format (step for CAD, stl for 3D printing).
+5. For clearance checks, run `cad_section.py` at relevant planes.
+6. Report artifact paths — they're in `~/.openclaw/workspace/cad-output/`.
 
 ## Design Rules
 
@@ -115,4 +102,4 @@ All dimensions are in millimeters.
 - Add fillets to stress concentrations (min 1mm for plastic, 0.5mm for metal).
 - Include mounting features (bosses, standoffs, screw posts) where applicable.
 - Specify material and process assumptions in comments.
-- Always output both the script and the exported file.
+- Output both the script and the exported file.

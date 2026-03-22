@@ -1,69 +1,37 @@
-# build123d-mcp
+# build123d-cad
 
-OpenClaw skill + MCP server for parametric 3D CAD via [build123d](https://github.com/gumyr/build123d). Generates STEP, STL, SVG from Python scripts.
+OpenClaw skill for parametric 3D CAD via [build123d](https://github.com/gumyr/build123d). Generates STEP, STL, SVG from Python scripts using the `exec` tool.
 
-## Tools
+## Scripts
 
-| Tool | Description |
-|------|-------------|
-| `cad_generate` | Execute build123d script → export STEP/STL/SVG |
-| `cad_measure` | Execute build123d script → bounding box, volume, surface area, center of mass |
-| `cad_section` | Generate 2D cross-section SVG at a given plane + offset |
-| `cad_list_api` | Return build123d API cheatsheet (no execution) |
+| Script | Description |
+|--------|-------------|
+| `cad_generate.py` | Execute build123d script → export STEP/STL/SVG |
+| `cad_measure.py` | Execute build123d script → bounding box, volume, surface area, center of mass |
+| `cad_section.py` | Generate 2D cross-section SVG at a given plane + offset |
+| `cad_api.py` | Print build123d API cheatsheet (no build123d dependency needed) |
 
-## Install as OpenClaw skill
+## Install
 
 ```bash
 # clone into OpenClaw workspace skills
-git clone https://github.com/xintlabs/build123d-mcp.git ~/.openclaw/workspace/skills/build123d-cad
+git clone https://github.com/xintlabs/build123d-cad.git ~/.openclaw/workspace/skills/build123d-cad
 
-# create venv pinned to Python 3.12 (build123d requires <=3.12 for OpenCascade wheels)
+# create venv with Python 3.12 (build123d requires <=3.12 for OpenCascade wheels)
 cd ~/.openclaw/workspace/skills/build123d-cad
 uv venv --python 3.12
-uv pip install -e .
+uv pip install build123d
 ```
 
-Then add the MCP server to `~/.openclaw/openclaw.json`:
+That's it. OpenClaw auto-discovers the `SKILL.md` on next session. No config changes needed.
 
-```json
-{
-  "mcpServers": {
-    "build123d": {
-      "command": "~/.openclaw/workspace/skills/build123d-cad/.venv/bin/python",
-      "args": ["-m", "src.server"],
-      "cwd": "~/.openclaw/workspace/skills/build123d-cad"
-    }
-  }
-}
-```
+The agent calls scripts via the `exec` tool using the venv Python at `{baseDir}/.venv/bin/python`. Exported files go to `~/.openclaw/workspace/cad-output/`.
 
-Restart gateway:
-
-```bash
-openclaw gateway restart
-```
-
-OpenClaw loads the `SKILL.md` (teaches the agent when and how to use the tools) and connects to the MCP server (provides the actual tool implementations). Exported files land in `~/.openclaw/workspace/cad-output/`.
-
-> **Note:** build123d requires Python ≤3.12 for OpenCascade wheels. Your system Python version doesn't matter — the MCP server runs in its own venv. `uv` auto-downloads 3.12 if needed.
-
-## Also works with Claude Desktop / Claude Code
-
-```json
-{
-  "mcpServers": {
-    "build123d": {
-      "command": "~/.openclaw/workspace/skills/build123d-cad/.venv/bin/python",
-      "args": ["-m", "src.server"],
-      "cwd": "~/.openclaw/workspace/skills/build123d-cad"
-    }
-  }
-}
-```
+> **Note:** build123d requires Python ≤3.12 for OpenCascade wheels. Your system Python doesn't matter — scripts run in their own venv.
 
 ## Script format
 
-All tools expect a `script` parameter. The final solid must be assigned to `result`:
+All scripts expect a `--script` argument with valid build123d Python. The final solid must be assigned to `result`:
 
 ```python
 from build123d import *
