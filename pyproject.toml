@@ -1,18 +1,15 @@
 [project]
 name = "build123d-mcp"
 version = "1.0.0"
-description = "MCP server for parametric 3D CAD via build123d — generates STEP, STL, SVG from Python scripts"
-requires-python = ">=3.10"
+description = "MCP server for parametric 3D CAD via build123d"
+requires-python = ">=3.10,<3.13"
 dependencies = [
     "fastmcp>=3.1.0",
     "build123d>=0.10.0",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
-
-[project.scripts]
-build123d-mcp = "src.server:main"
+dev = ["pytest>=8.0"]
 
 [build-system]
 requires = ["setuptools>=75.0"]
