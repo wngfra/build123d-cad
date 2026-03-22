@@ -15,7 +15,7 @@ OpenClaw skill for parametric 3D CAD via [build123d](https://github.com/gumyr/bu
 
 ```bash
 # clone into OpenClaw workspace skills
-git clone https://github.com/xintlabs/build123d-cad.git ~/.openclaw/workspace/skills/build123d-cad
+git clone https://github.com/xintlabs/build123d-cad.git ~/.openclaw/skills/build123d-cad
 
 # create venv with Python 3.12 (build123d requires <=3.12 for OpenCascade wheels)
 cd ~/.openclaw/workspace/skills/build123d-cad
