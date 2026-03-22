@@ -18,13 +18,15 @@ MCP server for parametric 3D CAD via [build123d](https://github.com/gumyr/build1
 git clone https://github.com/xintlabs/build123d-mcp.git ~/.openclaw/mcp-servers/build123d-mcp
 cd ~/.openclaw/mcp-servers/build123d-mcp
 
-# install (requires Python 3.10+)
+# create venv pinned to Python 3.12 (build123d requires <=3.12 for OpenCascade wheels)
+uv venv --python 3.12
+source .venv/bin/activate
 uv pip install -e .
-# or
-pip install -e .
 ```
 
-build123d pulls in OpenCascade (~800MB). First install takes a few minutes.
+build123d pulls in OpenCascade (~800MB). First install takes a few minutes. `uv` auto-downloads Python 3.12 if not present.
+
+> **Note:** Your system Python version doesn't matter. The MCP server runs in its own venv. OpenClaw spawns it as a child process — they never share a runtime.
 
 ## OpenClaw integration
 
@@ -34,7 +36,7 @@ Add to `~/.openclaw/openclaw.json`:
 {
   mcpServers: {
     "build123d": {
-      command: "python",
+      command: "~/.openclaw/mcp-servers/build123d-mcp/.venv/bin/python",
       args: ["-m", "src.server"],
       cwd: "~/.openclaw/mcp-servers/build123d-mcp"
     }
@@ -52,7 +54,7 @@ Your agent now has `cad_generate`, `cad_measure`, `cad_section`, and `cad_list_a
 {
   "mcpServers": {
     "build123d": {
-      "command": "python",
+      "command": "~/.openclaw/mcp-servers/build123d-mcp/.venv/bin/python",
       "args": ["-m", "src.server"],
       "cwd": "~/.openclaw/mcp-servers/build123d-mcp"
     }
@@ -83,15 +85,18 @@ with BuildPart() as result:
 ## Run standalone
 
 ```bash
+cd ~/.openclaw/mcp-servers/build123d-mcp
+
 # stdio transport (default)
-python -m src.server
+.venv/bin/python -m src.server
 
 # streamable HTTP
-CAD_WORKSPACE=/tmp/cad python -m src.server --transport streamable-http --port 8100
+CAD_WORKSPACE=/tmp/cad .venv/bin/python -m src.server --transport streamable-http --port 8100
 ```
 
 ## Test
 
 ```bash
-uv run pytest tests/ -v
+cd ~/.openclaw/mcp-servers/build123d-mcp
+.venv/bin/python -m pytest tests/ -v
 ```
