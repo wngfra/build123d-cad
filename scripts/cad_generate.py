@@ -1,49 +1,55 @@
 #!/usr/bin/env python3
-"""Execute a build123d script and export STEP/STL/SVG."""
+"""Execute a build123d script and export STEP/STL/SVG. All in subprocess."""
 
 import argparse
-import traceback
-from pathlib import Path
-
-from helpers import exec_script, get_part, output_json, output_error, WORKSPACE
+from helpers import run_sandboxed, output_json, WORKSPACE
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--script", required=True)
-    parser.add_argument("--format", choices=["step", "stl", "svg"], default="step")
-    parser.add_argument("--filename", default=None)
-    args = parser.parse_args()
+    p = argparse.ArgumentParser()
+    p.add_argument("--script", required=True)
+    p.add_argument("--format", choices=["step", "stl", "svg"], default="step")
+    p.add_argument("--filename", default="model")
+    args = p.parse_args()
 
-    r = exec_script(args.script)
-    if not r["ok"]:
-        output_error(r["error"], r["stdout"])
+    out_path = str(WORKSPACE / f"{args.filename}.{args.format}")
 
-    part = get_part(r["result"])
-    fname = args.filename or f"model_{id(part) % 100000:05d}"
-    out_path = WORKSPACE / f"{fname}.{args.format}"
+    sandbox_script = f'''
+import json, os, traceback
 
-    try:
-        from build123d import export_step, export_stl, export_svg
+# --- user script ---
+{args.script}
+# --- end user script ---
 
-        if args.format == "step":
-            export_step(part, str(out_path))
-        elif args.format == "stl":
-            export_stl(part, str(out_path))
-        elif args.format == "svg":
-            export_svg(part, str(out_path))
-    except Exception:
-        output_error(traceback.format_exc(), r["stdout"])
+_rp = os.environ["_RESULT_PATH"]
+_ws = os.environ["_WORKSPACE"]
+_out = {repr(out_path)}
+_fmt = {repr(args.format)}
 
-    bb = part.bounding_box()
-    output_json({
-        "success": True,
-        "artifact_path": str(out_path.resolve()),
-        "format": args.format,
-        "file_size_bytes": out_path.stat().st_size,
-        "bounding_box_mm": {"x": round(bb.size.X, 2), "y": round(bb.size.Y, 2), "z": round(bb.size.Z, 2)},
-        "stdout": r["stdout"],
-    })
+try:
+    _part = result.part if hasattr(result, "part") else result
+    os.makedirs(os.path.dirname(_out), exist_ok=True)
+
+    from build123d import export_step, export_stl, export_svg
+    if _fmt == "step": export_step(_part, _out)
+    elif _fmt == "stl": export_stl(_part, _out)
+    elif _fmt == "svg": export_svg(_part, _out)
+
+    _bb = _part.bounding_box()
+    with open(_rp, "w") as f:
+        json.dump({{
+            "success": True,
+            "artifact_path": _out,
+            "format": _fmt,
+            "file_size_bytes": os.path.getsize(_out),
+            "bounding_box_mm": {{"x": round(_bb.size.X, 2), "y": round(_bb.size.Y, 2), "z": round(_bb.size.Z, 2)}},
+        }}, f)
+except Exception:
+    with open(_rp, "w") as f:
+        json.dump({{"success": False, "error": traceback.format_exc()[-2000:]}}, f)
+'''
+
+    output_json(run_sandboxed(sandbox_script))
 
 
 if __name__ == "__main__":

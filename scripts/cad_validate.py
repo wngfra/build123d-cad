@@ -1,326 +1,193 @@
 #!/usr/bin/env python3
-"""Validate a build123d assembly for interference, clearance, and swept-volume collisions.
+"""Validate assembly for interference, clearance, swept-volume collisions. All in subprocess.
 
-The script expects a `--script` argument containing build123d Python that defines:
-  - `parts`: dict[str, Part] — named solids in the assembly
-  - `sweeps` (optional): list[dict] — moving parts with sweep definitions
-
-Example script:
-
-    from build123d import *
-
-    with BuildPart() as enclosure:
-        Box(100, 80, 50)
-        offset(amount=-3, openings=enclosure.faces().sort_by(Axis.Z)[-1:])
-
-    with BuildPart() as pcb:
-        with Locations((0, 0, 5)):
-            Box(60, 40, 2)
-
-    with BuildPart() as servo_arm:
-        with Locations((30, 0, 25)):
-            Box(5, 20, 3)
-
-    parts = {
-        "enclosure": enclosure.part,
-        "pcb": pcb.part,
-        "servo_arm": servo_arm.part,
-    }
-
-    # Optional: define swept volumes for moving parts
-    # Each sweep rotates a part around an axis through an angular range
-    sweeps = [
-        {
-            "name": "servo_arm",
-            "axis_origin": (30, 0, 25),   # pivot point (mm)
-            "axis_direction": (0, 1, 0),  # rotation axis
-            "angle_start": -45,            # degrees
-            "angle_end": 45,
-            "angle_step": 5,               # check every 5°
-        },
-    ]
-
-Modes:
-  --mode static     Check all part pairs for interference (Boolean intersection volume > 0)
-  --mode clearance  Check minimum clearance between all part pairs
-  --mode sweep      Generate swept volumes for moving parts, check against static parts
-  --mode full       Run all three checks (default)
+Script must define:
+  parts = {"name": solid, ...}
+  sweeps = [{"name", "axis_origin", "axis_direction", "angle_start", "angle_end", "angle_step"}, ...]  # optional
 """
 
 import argparse
-import itertools
-import json
-import math
-import sys
-import traceback
-from typing import Any
-
-from helpers import exec_script, get_part, output_json, output_error, WORKSPACE
-
-
-def check_static_interference(parts: dict) -> list[dict]:
-    """Check all part pairs for Boolean intersection. Returns list of interferences."""
-    interferences = []
-    for (name_a, part_a), (name_b, part_b) in itertools.combinations(parts.items(), 2):
-        try:
-            intersection = part_a & part_b
-            vol = intersection.volume if hasattr(intersection, "volume") else 0.0
-            if vol > 0.01:  # tolerance: 0.01 mm³
-                bb = intersection.bounding_box()
-                interferences.append({
-                    "part_a": name_a,
-                    "part_b": name_b,
-                    "overlap_volume_mm3": round(vol, 3),
-                    "overlap_bbox_mm": {
-                        "x": round(bb.size.X, 2),
-                        "y": round(bb.size.Y, 2),
-                        "z": round(bb.size.Z, 2),
-                    },
-                    "overlap_center_mm": {
-                        "x": round(bb.center().X, 2),
-                        "y": round(bb.center().Y, 2),
-                        "z": round(bb.center().Z, 2),
-                    },
-                })
-        except Exception:
-            interferences.append({
-                "part_a": name_a,
-                "part_b": name_b,
-                "error": f"Boolean intersection failed: {traceback.format_exc().splitlines()[-1]}",
-            })
-    return interferences
-
-
-def check_clearance(parts: dict) -> list[dict]:
-    """Approximate minimum clearance between all part pairs using bounding box gap."""
-    # True minimum distance requires OCC's BRepExtrema_DistShapeShape which is expensive.
-    # We use bounding box gap as a fast conservative estimate (actual clearance >= bbox gap).
-    clearances = []
-    for (name_a, part_a), (name_b, part_b) in itertools.combinations(parts.items(), 2):
-        try:
-            bb_a = part_a.bounding_box()
-            bb_b = part_b.bounding_box()
-
-            # Gap per axis: distance between nearest faces of the two bounding boxes
-            def axis_gap(a_min, a_max, b_min, b_max):
-                if a_max < b_min:
-                    return b_min - a_max
-                if b_max < a_min:
-                    return a_min - b_max
-                return 0.0  # overlapping on this axis
-
-            gx = axis_gap(bb_a.min.X, bb_a.max.X, bb_b.min.X, bb_b.max.X)
-            gy = axis_gap(bb_a.min.Y, bb_a.max.Y, bb_b.min.Y, bb_b.max.Y)
-            gz = axis_gap(bb_a.min.Z, bb_a.max.Z, bb_b.min.Z, bb_b.max.Z)
-
-            # If all axes overlap, parts may intersect — clearance is 0 (or negative)
-            if gx == 0 and gy == 0 and gz == 0:
-                min_clearance = 0.0
-            else:
-                # Euclidean distance between nearest bbox corners
-                min_clearance = math.sqrt(gx**2 + gy**2 + gz**2)
-
-            clearances.append({
-                "part_a": name_a,
-                "part_b": name_b,
-                "min_clearance_mm": round(min_clearance, 3),
-                "method": "bounding_box_gap",
-                "note": "Conservative estimate. Actual clearance >= this value." if min_clearance > 0 else "Bounding boxes overlap. Run static interference check.",
-            })
-        except Exception:
-            clearances.append({
-                "part_a": name_a,
-                "part_b": name_b,
-                "error": traceback.format_exc().splitlines()[-1],
-            })
-    return clearances
-
-
-def check_swept_volumes(parts: dict, sweeps: list[dict]) -> list[dict]:
-    """For each sweep definition, rotate the part through the angular range and check
-    each pose against all static parts for interference."""
-    from build123d import Axis, Vector, Rot, copy as bd_copy
-
-    collisions = []
-    for sweep in sweeps:
-        name = sweep["name"]
-        if name not in parts:
-            collisions.append({"sweep": name, "error": f"Part '{name}' not found in parts dict."})
-            continue
-
-        moving_part = parts[name]
-        origin = Vector(*sweep["axis_origin"])
-        direction = Vector(*sweep["axis_direction"])
-        angle_start = sweep.get("angle_start", -45)
-        angle_end = sweep.get("angle_end", 45)
-        angle_step = sweep.get("angle_step", 5)
-
-        static_parts = {k: v for k, v in parts.items() if k != name}
-
-        # Build the swept volume as a union of all rotated poses
-        swept = None
-        angles_checked = []
-
-        angle = angle_start
-        while angle <= angle_end:
-            try:
-                # Rotate a copy of the part around the defined axis
-                rotated = moving_part.rotate(Axis(origin, direction), angle)
-
-                if swept is None:
-                    swept = rotated
-                else:
-                    swept = swept + rotated  # union
-
-                angles_checked.append(angle)
-            except Exception:
-                collisions.append({
-                    "sweep": name,
-                    "angle_deg": angle,
-                    "error": f"Rotation failed: {traceback.format_exc().splitlines()[-1]}",
-                })
-            angle += angle_step
-
-        if swept is None:
-            collisions.append({"sweep": name, "error": "No valid rotated poses generated."})
-            continue
-
-        # Export swept volume for visualization
-        try:
-            from build123d import export_step
-            swept_path = WORKSPACE / f"swept_{name}.step"
-            export_step(swept, str(swept_path))
-        except Exception:
-            pass  # non-critical
-
-        # Check swept volume against each static part
-        for static_name, static_part in static_parts.items():
-            try:
-                intersection = swept & static_part
-                vol = intersection.volume if hasattr(intersection, "volume") else 0.0
-                if vol > 0.01:
-                    bb = intersection.bounding_box()
-                    collisions.append({
-                        "sweep": name,
-                        "collides_with": static_name,
-                        "overlap_volume_mm3": round(vol, 3),
-                        "overlap_center_mm": {
-                            "x": round(bb.center().X, 2),
-                            "y": round(bb.center().Y, 2),
-                            "z": round(bb.center().Z, 2),
-                        },
-                        "angle_range_deg": [angle_start, angle_end],
-                        "angles_checked": len(angles_checked),
-                        "swept_volume_path": str(swept_path) if (WORKSPACE / f"swept_{name}.step").exists() else None,
-                    })
-            except Exception:
-                collisions.append({
-                    "sweep": name,
-                    "collides_with": static_name,
-                    "error": traceback.format_exc().splitlines()[-1],
-                })
-
-        if not any(c.get("collides_with") for c in collisions if c.get("sweep") == name):
-            collisions.append({
-                "sweep": name,
-                "collides_with": None,
-                "status": "clear",
-                "angle_range_deg": [angle_start, angle_end],
-                "angles_checked": len(angles_checked),
-            })
-
-    return collisions
+from helpers import run_sandboxed, output_json, WORKSPACE
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--script", required=True)
-    parser.add_argument("--mode", choices=["static", "clearance", "sweep", "full"], default="full")
-    parser.add_argument("--min-clearance", type=float, default=1.0, help="Minimum acceptable clearance in mm")
-    args = parser.parse_args()
+    p = argparse.ArgumentParser()
+    p.add_argument("--script", required=True)
+    p.add_argument("--mode", choices=["static", "clearance", "sweep", "full"], default="full")
+    p.add_argument("--min-clearance", type=float, default=1.0)
+    args = p.parse_args()
 
-    r = exec_script(args.script)
-    if not r["ok"]:
-        output_error(r["error"], r["stdout"])
+    sandbox_script = f'''
+import json, os, math, itertools, traceback
 
-    parts_raw = r.get("parts")
-    if not parts_raw or not isinstance(parts_raw, dict):
-        output_error("Script must define `parts = {'name': part, ...}` dict.")
+# --- user script ---
+{args.script}
+# --- end user script ---
 
-    # Extract Part objects from BuildPart contexts
-    parts = {}
-    for name, ctx in parts_raw.items():
-        parts[name] = get_part(ctx) if hasattr(ctx, "part") else ctx
+_rp = os.environ["_RESULT_PATH"]
+_ws = os.environ.get("_WORKSPACE", ".")
+_mode = {repr(args.mode)}
+_min_clearance = {args.min_clearance}
 
-    # Sweeps are in the exec namespace — re-extract from the in-process exec
-    # (exec_script already validated the script, so the in-process re-exec is safe)
-    ns = {}
-    exec(args.script, ns)
-    sweeps = ns.get("sweeps", [])
 
-    result: dict[str, Any] = {
+def _get_part(ctx):
+    if hasattr(ctx, "part"): return ctx.part
+    if hasattr(ctx, "sketch"): return ctx.sketch
+    return ctx
+
+
+try:
+    if "parts" not in dir() and "parts" not in globals():
+        raise ValueError("Script must define `parts = {{'name': part, ...}}` dict.")
+
+    _parts = {{k: _get_part(v) for k, v in parts.items()}}
+    _sweeps = globals().get("sweeps", [])
+
+    _result = {{
         "success": True,
-        "part_count": len(parts),
-        "parts": list(parts.keys()),
-    }
+        "part_count": len(_parts),
+        "parts": list(_parts.keys()),
+    }}
 
-    # Static interference
-    if args.mode in ("static", "full"):
-        interferences = check_static_interference(parts)
-        result["static_interference"] = {
-            "checked_pairs": len(list(itertools.combinations(parts, 2))),
-            "interferences_found": len([i for i in interferences if "overlap_volume_mm3" in i]),
-            "details": interferences,
-        }
+    # --- static interference ---
+    if _mode in ("static", "full"):
+        _interferences = []
+        for (na, pa), (nb, pb) in itertools.combinations(_parts.items(), 2):
+            try:
+                _ix = pa & pb
+                _vol = _ix.volume if hasattr(_ix, "volume") else 0.0
+                if _vol > 0.01:
+                    _bb = _ix.bounding_box()
+                    _interferences.append({{
+                        "part_a": na, "part_b": nb,
+                        "overlap_volume_mm3": round(_vol, 3),
+                        "overlap_center_mm": {{"x": round(_bb.center().X, 2), "y": round(_bb.center().Y, 2), "z": round(_bb.center().Z, 2)}},
+                    }})
+            except Exception as e:
+                _interferences.append({{"part_a": na, "part_b": nb, "error": str(e)}})
+        _result["static_interference"] = {{
+            "checked_pairs": len(list(itertools.combinations(_parts, 2))),
+            "interferences_found": len([i for i in _interferences if "overlap_volume_mm3" in i]),
+            "details": _interferences,
+        }}
 
-    # Clearance
-    if args.mode in ("clearance", "full"):
-        clearances = check_clearance(parts)
-        violations = [c for c in clearances if c.get("min_clearance_mm", 999) < args.min_clearance and "error" not in c]
-        result["clearance"] = {
-            "min_acceptable_mm": args.min_clearance,
-            "violations": len(violations),
-            "details": clearances,
-        }
+    # --- clearance ---
+    if _mode in ("clearance", "full"):
+        _clearances = []
+        for (na, pa), (nb, pb) in itertools.combinations(_parts.items(), 2):
+            try:
+                _bba = pa.bounding_box()
+                _bbb = pb.bounding_box()
+                def _gap(a0, a1, b0, b1):
+                    if a1 < b0: return b0 - a1
+                    if b1 < a0: return a0 - b1
+                    return 0.0
+                _gx = _gap(_bba.min.X, _bba.max.X, _bbb.min.X, _bbb.max.X)
+                _gy = _gap(_bba.min.Y, _bba.max.Y, _bbb.min.Y, _bbb.max.Y)
+                _gz = _gap(_bba.min.Z, _bba.max.Z, _bbb.min.Z, _bbb.max.Z)
+                _mc = math.sqrt(_gx**2 + _gy**2 + _gz**2) if (_gx or _gy or _gz) else 0.0
+                _clearances.append({{"part_a": na, "part_b": nb, "min_clearance_mm": round(_mc, 3)}})
+            except Exception as e:
+                _clearances.append({{"part_a": na, "part_b": nb, "error": str(e)}})
+        _result["clearance"] = {{
+            "min_acceptable_mm": _min_clearance,
+            "violations": len([c for c in _clearances if c.get("min_clearance_mm", 999) < _min_clearance and "error" not in c]),
+            "details": _clearances,
+        }}
 
-    # Swept volume
-    if args.mode in ("sweep", "full") and sweeps:
-        collisions = check_swept_volumes(parts, sweeps)
-        result["swept_volume"] = {
-            "sweeps_defined": len(sweeps),
-            "collisions_found": len([c for c in collisions if c.get("overlap_volume_mm3", 0) > 0]),
-            "details": collisions,
-        }
+    # --- swept volume ---
+    if _mode in ("sweep", "full") and _sweeps:
+        from build123d import Axis, Vector, export_step
 
-    # Verdict
-    has_interference = any(
-        i.get("overlap_volume_mm3", 0) > 0
-        for i in result.get("static_interference", {}).get("details", [])
-    )
-    has_clearance_violation = result.get("clearance", {}).get("violations", 0) > 0
-    has_sweep_collision = any(
-        c.get("overlap_volume_mm3", 0) > 0
-        for c in result.get("swept_volume", {}).get("details", [])
-    )
+        _collisions = []
+        for _sw in _sweeps:
+            _sn = _sw["name"]
+            if _sn not in _parts:
+                _collisions.append({{"sweep": _sn, "error": f"Part '{{_sn}}' not in parts."}})
+                continue
+            _mp = _parts[_sn]
+            _origin = Vector(*_sw["axis_origin"])
+            _dir = Vector(*_sw["axis_direction"])
+            _a0 = _sw.get("angle_start", -45)
+            _a1 = _sw.get("angle_end", 45)
+            _step = _sw.get("angle_step", 5)
+            _statics = {{k: v for k, v in _parts.items() if k != _sn}}
 
-    if has_interference or has_sweep_collision:
-        result["verdict"] = "FAIL"
-        result["verdict_reason"] = []
-        if has_interference:
-            result["verdict_reason"].append("Static interference detected between parts.")
-        if has_sweep_collision:
-            result["verdict_reason"].append("Moving parts collide during sweep.")
-        if has_clearance_violation:
-            result["verdict_reason"].append(f"Clearance below {args.min_clearance}mm threshold.")
-    elif has_clearance_violation:
-        result["verdict"] = "WARN"
-        result["verdict_reason"] = [f"Clearance below {args.min_clearance}mm threshold."]
+            _swept = None
+            _n_angles = 0
+            _a = _a0
+            while _a <= _a1:
+                try:
+                    _rot = _mp.rotate(Axis(_origin, _dir), _a)
+                    _swept = _rot if _swept is None else (_swept + _rot)
+                    _n_angles += 1
+                except: pass
+                _a += _step
+
+            if _swept is None:
+                _collisions.append({{"sweep": _sn, "error": "No valid poses."}})
+                continue
+
+            try:
+                _sp = os.path.join(_ws, f"swept_{{_sn}}.step")
+                os.makedirs(os.path.dirname(_sp), exist_ok=True)
+                export_step(_swept, _sp)
+            except: pass
+
+            _found = False
+            for _sk, _sv in _statics.items():
+                try:
+                    _ix = _swept & _sv
+                    _vol = _ix.volume if hasattr(_ix, "volume") else 0.0
+                    if _vol > 0.01:
+                        _found = True
+                        _bb = _ix.bounding_box()
+                        _collisions.append({{
+                            "sweep": _sn, "collides_with": _sk,
+                            "overlap_volume_mm3": round(_vol, 3),
+                            "overlap_center_mm": {{"x": round(_bb.center().X, 2), "y": round(_bb.center().Y, 2), "z": round(_bb.center().Z, 2)}},
+                            "angles_checked": _n_angles,
+                        }})
+                except Exception as e:
+                    _collisions.append({{"sweep": _sn, "collides_with": _sk, "error": str(e)}})
+
+            if not _found:
+                _collisions.append({{"sweep": _sn, "collides_with": None, "status": "clear", "angles_checked": _n_angles}})
+
+        _result["swept_volume"] = {{
+            "sweeps_defined": len(_sweeps),
+            "collisions_found": len([c for c in _collisions if c.get("overlap_volume_mm3", 0) > 0]),
+            "details": _collisions,
+        }}
+
+    # --- verdict ---
+    _has_ix = any(i.get("overlap_volume_mm3", 0) > 0 for i in _result.get("static_interference", {{}}).get("details", []))
+    _has_sw = any(c.get("overlap_volume_mm3", 0) > 0 for c in _result.get("swept_volume", {{}}).get("details", []))
+    _has_cl = _result.get("clearance", {{}}).get("violations", 0) > 0
+
+    if _has_ix or _has_sw:
+        _result["verdict"] = "FAIL"
+        _reasons = []
+        if _has_ix: _reasons.append("Static interference detected.")
+        if _has_sw: _reasons.append("Swept volume collision detected.")
+        if _has_cl: _reasons.append(f"Clearance below {{_min_clearance}}mm.")
+        _result["verdict_reason"] = _reasons
+    elif _has_cl:
+        _result["verdict"] = "WARN"
+        _result["verdict_reason"] = [f"Clearance below {{_min_clearance}}mm."]
     else:
-        result["verdict"] = "PASS"
-        result["verdict_reason"] = ["No interference, clearance OK."]
+        _result["verdict"] = "PASS"
+        _result["verdict_reason"] = ["No interference, clearance OK."]
 
-    result["stdout"] = r["stdout"]
-    output_json(result)
+    with open(_rp, "w") as f:
+        json.dump(_result, f)
+
+except Exception:
+    with open(_rp, "w") as f:
+        json.dump({{"success": False, "error": traceback.format_exc()[-2000:]}}, f)
+'''
+
+    output_json(run_sandboxed(sandbox_script, timeout=180))  # longer timeout for swept volumes
 
 
 if __name__ == "__main__":

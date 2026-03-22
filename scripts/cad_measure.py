@@ -1,38 +1,44 @@
 #!/usr/bin/env python3
-"""Execute a build123d script and return measurements."""
+"""Execute a build123d script and return measurements. All in subprocess."""
 
 import argparse
-import traceback
-
-from helpers import exec_script, get_part, output_json, output_error
+from helpers import run_sandboxed, output_json
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--script", required=True)
-    args = parser.parse_args()
+    p = argparse.ArgumentParser()
+    p.add_argument("--script", required=True)
+    args = p.parse_args()
 
-    r = exec_script(args.script)
-    if not r["ok"]:
-        output_error(r["error"], r["stdout"])
+    sandbox_script = f'''
+import json, os, traceback
 
-    part = get_part(r["result"])
+# --- user script ---
+{args.script}
+# --- end user script ---
 
-    try:
-        bb = part.bounding_box()
-        com = part.center()
-        output_json({
+_rp = os.environ["_RESULT_PATH"]
+
+try:
+    _part = result.part if hasattr(result, "part") else result
+    _bb = _part.bounding_box()
+    _com = _part.center()
+    with open(_rp, "w") as f:
+        json.dump({{
             "success": True,
-            "bounding_box_mm": {"x": round(bb.size.X, 2), "y": round(bb.size.Y, 2), "z": round(bb.size.Z, 2)},
-            "volume_mm3": round(part.volume, 2),
-            "surface_area_mm2": round(part.area, 2),
-            "center_of_mass_mm": {"x": round(com.X, 2), "y": round(com.Y, 2), "z": round(com.Z, 2)},
-            "face_count": len(part.faces()),
-            "edge_count": len(part.edges()),
-            "stdout": r["stdout"],
-        })
-    except Exception:
-        output_error(traceback.format_exc(), r["stdout"])
+            "bounding_box_mm": {{"x": round(_bb.size.X, 2), "y": round(_bb.size.Y, 2), "z": round(_bb.size.Z, 2)}},
+            "volume_mm3": round(_part.volume, 2),
+            "surface_area_mm2": round(_part.area, 2),
+            "center_of_mass_mm": {{"x": round(_com.X, 2), "y": round(_com.Y, 2), "z": round(_com.Z, 2)}},
+            "face_count": len(_part.faces()),
+            "edge_count": len(_part.edges()),
+        }}, f)
+except Exception:
+    with open(_rp, "w") as f:
+        json.dump({{"success": False, "error": traceback.format_exc()[-2000:]}}, f)
+'''
+
+    output_json(run_sandboxed(sandbox_script))
 
 
 if __name__ == "__main__":
