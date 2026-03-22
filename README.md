@@ -34,11 +34,11 @@ Add to `~/.openclaw/openclaw.json`:
 
 ```json5
 {
-  mcpServers: {
+  "mcpServers": {
     "build123d": {
-      command: "~/.openclaw/mcp-servers/build123d-mcp/.venv/bin/python",
-      args: ["-m", "src.server"],
-      cwd: "~/.openclaw/mcp-servers/build123d-mcp"
+      "command": "~/.openclaw/mcp-servers/build123d-mcp/.venv/bin/python",
+      "args": ["-m", "src.server"],
+      "cwd": "~/.openclaw/mcp-servers/build123d-mcp"
     }
   }
 }
